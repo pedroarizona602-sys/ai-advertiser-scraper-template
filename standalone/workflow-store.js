@@ -83,6 +83,7 @@ export function createWorkflowStore(dataDir) {
       if(req.method==="DELETE"){rows.splice(index,1);await save(type,rows);send(res,200,{ok:true});return true;}
       const body=await readBody(req);
       if(STATUSES[type] && body.status && !STATUSES[type].has(body.status)){send(res,400,{error:"Invalid status"});return true;}
+      if(type==="outreach" && body.status==="sent"){send(res,409,{error:"Outreach cannot be marked sent until a sending provider is connected and a delivery receipt is recorded."});return true;}
       if(type==="approvals" && body.status==="approved") rows[index].approvedAt=new Date().toISOString();
       for(const key of FIELDS) if(key in body) rows[index][key]=body[key];
       rows[index].updatedAt=new Date().toISOString(); await save(type,rows); send(res,200,{item:rows[index]}); return true;
