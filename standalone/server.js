@@ -147,6 +147,20 @@ const server = http.createServer(async (req,res) => {
       await persist();
       return send(res,200,{updated,leads:leads.map(x=>({id:x.id,score:x.score,scoreTier:x.scoreTier,qualified:x.qualified}))});
     }
+    if(url.pathname==="/api/calendar.ics" && req.method==="GET"){
+      let appointments=[];try{appointments=JSON.parse(await readFile(path.join(DATA_DIR,"appointments.json"),"utf8"));}catch{}
+      const esc=value=>String(value||"").replace(/\\\\/g,"\\\\\\\\").replace(/\\n/g,"\\\\n").replace(/,/g,"\\\\,").replace(/;/g,"\\\\;");
+      const stamp=value=>String(value||"").replace(/[-:]/g,"").replace(/\\.\\d{3}/,"");
+      const events=(Array.isArray(appointments)?appointments:[]).filter(a=>a.status==="scheduled"&&a.date&&a.time).map(a=>{
+        const start=String(a.date).replace(/-/g,"")+"T"+String(a.time).replace(/:/g,"")+"00";
+        const endDate=new Date(Date.UTC(Number(a.date.slice(0,4)),Number(a.date.slice(5,7))-1,Number(a.date.slice(8,10)),Number(a.time.slice(0,2)),Number(a.time.slice(3,5)))+(Number(a.durationMinutes)||30)*60000);
+        const end=endDate.toISOString().replace(/[-:]/g,"").replace(/\\.\\d{3}Z/,"");
+        return ["BEGIN:VEVENT","UID:"+a.id+"@nexora","DTSTAMP:"+new Date().toISOString().replace(/[-:]/g,"").replace(/\\.\\d{3}Z/,"")+"Z","DTSTART:"+start,"DTEND:"+end,"SUMMARY:"+esc(a.title),"DESCRIPTION:"+esc(a.notes||a.description||""),"LOCATION:"+esc(a.location||""),"END:VEVENT"].join("\\r\\n");
+      });
+      const calendar=["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//Nexora Smart Digital//Appointments//EN","CALSCALE:GREGORIAN",...events,"END:VCALENDAR"].join("\\r\\n");
+      res.writeHead(200,{"content-type":"text/calendar; charset=utf-8","content-disposition":'attachment; filename="nexora-appointments.ics"',"cache-control":"no-store"});
+      return res.end(calendar);
+    }
     if (await handleWorkflow(req,res,url,send,readBody)) return;
     const activityMatch=url.pathname.match(/^\\/api\\/leads\\/([\\w-]+)\\/activity$/);
     if(activityMatch && req.method==="GET"){
