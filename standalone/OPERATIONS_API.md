@@ -41,3 +41,10 @@ Presence checks do not prove credentials are valid. GoHighLevel contact upsert i
 - No voice calls or live AI receptionist are active.
 - Website projects are tracked but no automatic site publishing engine is connected.
 - No LLM-powered sales assistant is connected yet.
+
+
+## Client onboarding checklist
+
+`POST /api/clients/onboarding` with `{ "clientId": "..." }` creates a repeat-safe set of internal onboarding tasks for an existing client: business details, services/pricing, brand assets, website requirements, domain/access, first draft, revisions, and explicit launch approval. It updates the client to `onboarding`. It does not email the client, collect files, request credentials, or publish a website.
+
+Outreach records are drafts only. The API rejects attempts to mark an outreach record `sent` until a delivery integration and receipt workflow exist.
