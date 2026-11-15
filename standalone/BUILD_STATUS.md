@@ -15,6 +15,9 @@ This file is a development ledger, not a claim that the application is productio
 - Manual website audit checklist with transparent observation-based scoring (not an automated scan)
 - Cinematic black-and-gold JARVIS-inspired command center interface with responsive layouts
 - Persistent lead activity timeline, manual notes, and automatic status/qualification change events
+- Appointment validation with overlapping-time protection
+- Invoice amount and currency validation
+- Downloadable iCalendar export for scheduled appointments
 - Dashboard cards for lead pipeline and operations records
 
 ## Still to build
