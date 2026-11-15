@@ -86,7 +86,7 @@ const server = http.createServer(async (req,res) => {
       const [clients,appointments,tasks,invoices,approvals,outreach,proposals,projects,callLogs]=await Promise.all(["clients","appointments","tasks","invoices","approvals","outreach","proposals","projects","callLogs"].map(readCollection));
       return send(res,200,{leads:{total:leads.length,qualified:leads.filter(x=>x.qualified).length,withoutWebsite:leads.filter(x=>!x.website).length,new:leads.filter(x=>x.status==="new").length,highPriority:leads.filter(x=>x.scoreTier==="high").length},clients:clients.length,appointments:{total:appointments.length,upcoming:appointments.filter(x=>["requested","scheduled"].includes(x.status)).length},tasks:{total:tasks.length,open:tasks.filter(x=>x.status!=="done").length},invoices:{total:invoices.length,unpaid:invoices.filter(x=>!["paid","cancelled"].includes(x.status)).length},approvals:{total:approvals.length,pending:approvals.filter(x=>x.status==="pending").length},outreach:{drafts:outreach.length,awaitingApproval:outreach.filter(x=>x.status==="pending_approval").length},proposals:{total:proposals.length,awaitingReview:proposals.filter(x=>x.status==="ready_for_review").length},projects:{total:projects.length,active:projects.filter(x=>!["completed","on_hold"].includes(x.status)).length},callLogs:callLogs.length});
     }
-    const ghlSyncMatch=url.pathname.match(/^\\/api\\/integrations\\/highlevel\\/sync\\/([\\w-]+)$/);
+    const ghlPrefix="/api/integrations/highlevel/sync/"; const ghlId=url.pathname.startsWith(ghlPrefix)?url.pathname.slice(ghlPrefix.length):""; const ghlSyncMatch=ghlId && /^[a-zA-Z0-9_-]+$/.test(ghlId) ? [null,ghlId] : null;
     if (ghlSyncMatch && req.method === "POST") {
       if (!GHL_API_KEY || !GHL_LOCATION_ID) return send(res,503,{error:"GoHighLevel is not configured. Add a sub-account Private Integration Token and location ID in Railway Variables."});
       const lead=leads.find(x=>x.id===ghlSyncMatch[1]);
@@ -101,7 +101,7 @@ const server = http.createServer(async (req,res) => {
       lead.ghlContactId=contactId; lead.ghlSyncedAt=new Date().toISOString(); await persist();
       return send(res,200,{ok:true,contactId,created:result.new??null});
     }
-    const salesKitMatch=url.pathname.match(/^\\/api\\/sales-kit\\/([\\w-]+)$/);
+    const salesPrefix="/api/sales-kit/"; const salesId=url.pathname.startsWith(salesPrefix)?url.pathname.slice(salesPrefix.length):""; const salesKitMatch=salesId && /^[a-zA-Z0-9_-]+$/.test(salesId) ? [null,salesId] : null;
     if (salesKitMatch && req.method==="GET") {
       const lead=leads.find(x=>x.id===salesKitMatch[1]);
       if(!lead) return send(res,404,{error:"Lead not found"});
