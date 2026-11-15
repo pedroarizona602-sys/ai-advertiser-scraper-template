@@ -32,7 +32,8 @@ export function createWorkflowStore(dataDir) {
     if (req.method==="POST" && !id) {
       const body=await readBody(req);
       if (type==="approvals" && (!body.action || !body.description)) { send(res,400,{error:"An approval needs an action and description."}); return true; }
-      const item={...body,id:crypto.randomUUID(),status:type==="approvals"?"pending":(body.status||"todo"),createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+      const defaults={clients:"active",appointments:"requested",tasks:"todo",invoices:"draft",approvals:"pending"};
+      const item={...body,id:crypto.randomUUID(),status:body.status||defaults[type],createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
       delete item.approvedAt; const rows=await load(type); rows.unshift(item); await save(type,rows);
       send(res,201,{item}); return true;
     }
