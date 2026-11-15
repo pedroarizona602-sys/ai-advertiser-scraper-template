@@ -104,6 +104,13 @@ const server = http.createServer(async (req,res) => {
       return send(res,200,{ok:true,contactId,created:result.new??null});
     }
     const salesPrefix="/api/sales-kit/"; const salesId=url.pathname.startsWith(salesPrefix)?url.pathname.slice(salesPrefix.length):""; const salesKitMatch=salesId && /^[a-zA-Z0-9_-]+$/.test(salesId) ? [null,salesId] : null;
+    const proposalPrefix="/api/proposal-kit/"; const proposalId=url.pathname.startsWith(proposalPrefix)?url.pathname.slice(proposalPrefix.length):""; const proposalMatch=proposalId && /^[a-zA-Z0-9_-]+$/.test(proposalId) ? [null,proposalId] : null;
+    if(proposalMatch && req.method==="GET"){
+      const lead=leads.find(x=>x.id===proposalMatch[1]);
+      if(!lead)return send(res,404,{error:"Lead not found"});
+      const scope=["Mobile-first custom website design","Clear service pages and calls to action","Contact and quote-request form","Local SEO foundations and page metadata","Basic analytics and lead-capture setup"];
+      return send(res,200,{lead:{id:lead.id,name:lead.name,phone:lead.phone,website:lead.website,city:lead.city},proposal:{title:"Website growth proposal for "+lead.name,preparedFor:lead.name,preparedBy:"Nexora Smart Digital",objective:"Create a professional online presence that helps local customers understand the services and request a quote.",scope,clientInputs:["Business details and service area","Approved logo, colors, and photos","Services, pricing, and preferred calls to action","Domain access when needed"],milestones:["Discovery and content collection","Initial design and build","Client review and revisions","Launch after explicit written approval"],investment:"To be confirmed by Nexora",timeline:"To be agreed after requirements are confirmed",terms:"Payment schedule, revision allowance, hosting, ongoing support, and cancellation terms must be agreed in writing before work begins."}});
+    }
     if (salesKitMatch && req.method==="GET") {
       const lead=leads.find(x=>x.id===salesKitMatch[1]);
       if(!lead) return send(res,404,{error:"Lead not found"});
