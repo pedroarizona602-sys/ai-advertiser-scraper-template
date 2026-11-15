@@ -91,8 +91,10 @@ const server = http.createServer(async (req,res) => {
       if (!GHL_API_KEY || !GHL_LOCATION_ID) return send(res,503,{error:"GoHighLevel is not configured. Add a sub-account Private Integration Token and location ID in Railway Variables."});
       const lead=leads.find(x=>x.id===ghlSyncMatch[1]);
       if (!lead) return send(res,404,{error:"Lead not found"});
+      if (!lead.qualified) return send(res,400,{error:"Only leads marked qualified can be synced to GoHighLevel."});
+      if (!lead.phone) return send(res,400,{error:"This lead has no phone number. Add a valid email or phone before syncing."});
       if (lead.ghlContactId) return send(res,200,{ok:true,alreadySynced:true,contactId:lead.ghlContactId});
-      const payload={locationId:GHL_LOCATION_ID,name:lead.name,companyName:lead.name,phone:lead.phone||undefined,website:lead.website||undefined,address1:lead.address||undefined,source:"Nexora Smart Digital Lead Engine",tags:["Nexora Lead","Website Prospect"]};
+      const nameParts=String(lead.name||"").trim().split(/\\s+/); const payload={locationId:GHL_LOCATION_ID,firstName:nameParts.shift()||lead.name,lastName:nameParts.join(" "),companyName:lead.name,phone:lead.phone,website:lead.website||undefined,address1:lead.address||undefined,source:"Nexora Smart Digital Lead Engine",tags:["Nexora Lead","Website Prospect"]};
       const response=await fetch("https://services.leadconnectorhq.com/contacts/upsert",{method:"POST",headers:{"Authorization":"Bearer "+GHL_API_KEY,"Version":"2021-07-28","Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify(payload)});
       const result=await response.json().catch(()=>({}));
       if(!response.ok) return send(res,502,{error:result.message||result.error||"GoHighLevel sync failed. Check token permissions and location."});
