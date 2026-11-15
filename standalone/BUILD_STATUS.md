@@ -13,10 +13,13 @@ This file is a development ledger, not a claim that the application is productio
 - Client onboarding checklist generator that creates repeat-safe project tasks
 - Outreach records cannot be falsely marked sent without a delivery integration
 - Manual website audit checklist with transparent observation-based scoring (not an automated scan)
+- Cinematic black-and-gold JARVIS-inspired command center interface with responsive layouts
+- Persistent lead activity timeline, manual notes, and automatic status/qualification change events
 - Dashboard cards for lead pipeline and operations records
 
 ## Still to build
 - Complete polished UI for every collection, including edit/detail views and searchable lists
+- Dedicated lead detail workspace with a full timeline, editable follow-up dates, and contact history
 - Automated website audit/capture and AI-powered qualification with verified evidence
 - GoHighLevel pipeline/opportunity sync, conversations, workflow enrollment, and activity history
 - Calendar provider integration with availability checks, booking, reminders, cancellation, and timezone handling
