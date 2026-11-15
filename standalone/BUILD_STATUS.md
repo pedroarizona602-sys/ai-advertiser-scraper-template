@@ -12,7 +12,9 @@ This file is a development ledger, not a claim that the application is productio
 - Per-lead sales preparation kit with editable email and call-script drafts
 - Client onboarding checklist generator that creates repeat-safe project tasks
 - Outreach records cannot be falsely marked sent without a delivery integration
-- Manual website audit checklist with transparent observation-based scoring (not an automated scan)
+- Manual website audit checklist with transparent observation-based scoring
+- Automated public-website HTML audit: HTTPS, viewport metadata, title, meta description, H1, service wording, contact capture, and common conversion CTA checks; saves scored audit records and findings
+- Website scan safeguards: HTTP(S) only, public DNS/IP checks, restricted ports, redirect revalidation, response size cap, and request timeout; explicitly discloses audit limitations
 - Cinematic black-and-gold JARVIS-inspired command center interface with responsive layouts
 - Persistent lead activity timeline, manual notes, and automatic status/qualification change events
 - Per-lead follow-up scheduling with a due/upcoming follow-up queue API and dashboard action
@@ -28,7 +30,7 @@ This file is a development ledger, not a claim that the application is productio
 ## Still to build
 - Complete polished UI for every collection, including edit/detail views and searchable lists
 - Dedicated lead detail workspace with a full timeline, editable follow-up dates, and contact history
-- Automated website audit/capture and AI-powered qualification with verified evidence (manual audit checklist exists; automated provider integration remains outstanding)
+- Deeper rendered-browser website audit, page-speed/accessibility testing, and AI-powered qualification with verified evidence
 - GoHighLevel pipeline/opportunity sync, conversations, workflow enrollment, and activity history
 - Calendar provider integration with availability checks, booking, reminders, cancellation, and timezone handling
 - Payment provider integration, invoice creation, payment links, webhook reconciliation, and accounting-safe ledger
