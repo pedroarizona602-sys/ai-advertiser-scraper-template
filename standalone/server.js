@@ -11,7 +11,7 @@ const DATA_DIR = process.env.DATA_DIR || (process.env.RAILWAY_VOLUME_MOUNT_PATH 
 const DB_FILE = path.join(DATA_DIR, "leads.json");
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
-const GHL_API_KEY = process.env.GHL_API_KEY || "";
+const GHL_API_KEY = process.env.GHL_API_KEY || process.env.GHL_ACCESS_TOKEN || "";
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || "";
 let leads = [];
 
@@ -81,6 +81,21 @@ const server = http.createServer(async (req,res) => {
     if (url.pathname === "/health") return send(res,200,{ok:true,service:"nexora-lead-engine",savedLeads:leads.length});
     if (!authorized(req)) { res.writeHead(401, {"www-authenticate":'Basic realm="Nexora Lead Engine"',"content-type":"application/json"}); return res.end(JSON.stringify({error:"Sign in required"})); }
     if (url.pathname === "/api/config" && req.method === "GET") return send(res,200,{placesReady:Boolean(GOOGLE_PLACES_API_KEY),googlePlacesConfigured:Boolean(GOOGLE_PLACES_API_KEY),goHighLevelConfigured:Boolean(GHL_API_KEY && GHL_LOCATION_ID),voiceConfigured:Boolean(process.env.VOICE_PROVIDER_API_KEY),savedLeads:leads.length,securePasswordConfigured:ADMIN_PASSWORD.length>=16});
+    const ghlSyncMatch=url.pathname.match(/^\\/api\\/integrations\\/highlevel\\/sync\\/([\\w-]+)$/);
+    if (ghlSyncMatch && req.method === "POST") {
+      if (!GHL_API_KEY || !GHL_LOCATION_ID) return send(res,503,{error:"GoHighLevel is not configured. Add a sub-account Private Integration Token and location ID in Railway Variables."});
+      const lead=leads.find(x=>x.id===ghlSyncMatch[1]);
+      if (!lead) return send(res,404,{error:"Lead not found"});
+      if (lead.ghlContactId) return send(res,200,{ok:true,alreadySynced:true,contactId:lead.ghlContactId});
+      const payload={locationId:GHL_LOCATION_ID,name:lead.name,companyName:lead.name,phone:lead.phone||undefined,website:lead.website||undefined,address1:lead.address||undefined,source:"Nexora Smart Digital Lead Engine",tags:["Nexora Lead","Website Prospect"]};
+      const response=await fetch("https://services.leadconnectorhq.com/contacts/upsert",{method:"POST",headers:{"Authorization":"Bearer "+GHL_API_KEY,"Version":"2021-07-28","Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify(payload)});
+      const result=await response.json().catch(()=>({}));
+      if(!response.ok) return send(res,502,{error:result.message||result.error||"GoHighLevel sync failed. Check token permissions and location."});
+      const contactId=result.contact?.id;
+      if(!contactId) return send(res,502,{error:"GoHighLevel returned no contact ID; local lead was not marked synced."});
+      lead.ghlContactId=contactId; lead.ghlSyncedAt=new Date().toISOString(); await persist();
+      return send(res,200,{ok:true,contactId,created:result.new??null});
+    }
     if (url.pathname === "/api/qualification" && req.method === "POST") {
       const body=await readBody(req), ids=Array.isArray(body.ids)?new Set(body.ids):null;
       let updated=0;
