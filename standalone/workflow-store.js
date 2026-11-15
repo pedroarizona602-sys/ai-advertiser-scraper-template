@@ -2,7 +2,7 @@ import { readFile, writeFile, rename } from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 
-const TYPES = new Set(["clients","appointments","tasks","invoices","approvals","outreach","proposals","projects","callLogs"]);
+const TYPES = new Set(["clients","appointments","tasks","invoices","approvals","outreach","proposals","projects","callLogs","audits"]);
 const STATUSES = {
   clients:new Set(["active","inactive","onboarding","completed"]),
   appointments:new Set(["requested","scheduled","completed","cancelled"]),
@@ -12,10 +12,11 @@ const STATUSES = {
   outreach:new Set(["draft","pending_approval","approved","sent","failed","cancelled"]),
   proposals:new Set(["draft","ready_for_review","sent","accepted","rejected"]),
   projects:new Set(["intake","planning","in_progress","review","completed","on_hold"]),
-  callLogs:new Set(["new","reviewed","follow_up","closed"])
+  callLogs:new Set(["new","reviewed","follow_up","closed"]),
+  audits:new Set(["draft","reviewed","needs_work","complete"])
 };
-const DEFAULTS = {clients:"active",appointments:"requested",tasks:"todo",invoices:"draft",approvals:"pending",outreach:"draft",proposals:"draft",projects:"intake",callLogs:"new"};
-const FIELDS = ["status","title","name","email","phone","company","notes","date","time","durationMinutes","amount","currency","dueDate","leadId","clientId","description","assignedTo","action","decisionNote","channel","message","subject","recipient","scheduledAt","sentAt","externalId","serviceType","budget","deadline","websiteUrl","revisionNotes","callOutcome","transcriptSummary","source","priority"];
+const DEFAULTS = {clients:"active",appointments:"requested",tasks:"todo",invoices:"draft",approvals:"pending",outreach:"draft",proposals:"draft",projects:"intake",callLogs:"new",audits:"draft"};
+const FIELDS = ["status","title","name","email","phone","company","notes","date","time","durationMinutes","amount","currency","dueDate","leadId","clientId","description","assignedTo","action","decisionNote","channel","message","subject","recipient","scheduledAt","sentAt","externalId","serviceType","budget","deadline","websiteUrl","revisionNotes","callOutcome","transcriptSummary","source","priority","mobileFriendly","https","clearCTA","contactForm","serviceArea","findings","auditScore"];
 export function createWorkflowStore(dataDir) {
   async function load(type) {
     if (!TYPES.has(type)) throw new Error("Unsupported record type");
@@ -41,7 +42,9 @@ export function createWorkflowStore(dataDir) {
       if (type==="outreach" && (!body.channel || !body.recipient || !body.message)) { send(res,400,{error:"An outreach draft needs a channel, recipient, and message."}); return true; }
       if (type==="proposals" && !body.name && !body.company) { send(res,400,{error:"A proposal needs a client or company name."}); return true; }
       if (type==="projects" && !body.name && !body.company) { send(res,400,{error:"A project needs a client or company name."}); return true; }
+      if (type==="audits" && (!body.name || !body.websiteUrl)) { send(res,400,{error:"A website audit needs a business name and website URL."}); return true; }
       const item={...body,id:crypto.randomUUID(),status:body.status||DEFAULTS[type],createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+      if(type==="audits"){const checks=["mobileFriendly","https","clearCTA","contactForm"];const penalties={mobileFriendly:25,https:15,clearCTA:20,contactForm:20};item.auditScore=Math.max(0,100-checks.reduce((sum,key)=>sum+(String(item[key]||"").toLowerCase()==="no"?penalties[key]:0),0));item.auditNote="Manual checklist score based on entered observations; not an automated website scan.";}
       delete item.approvedAt; delete item.sentAt;
       const rows=await load(type); rows.unshift(item); await save(type,rows);
       send(res,201,{item}); return true;
