@@ -261,6 +261,17 @@ const server = http.createServer(async (req,res) => {
       await logLeadActivity(lead.id,"note",message);
       return send(res,201,{ok:true});
     }
+    if(url.pathname==="/api/reminders" && req.method==="GET"){
+      const now=new Date(), horizon=new Date(now.getTime()+7*86400000);
+      const readRows=async name=>{try{const rows=JSON.parse(await readFile(path.join(DATA_DIR,name+".json"),"utf8"));return Array.isArray(rows)?rows:[]}catch{return []}};
+      const [appointments,tasks,invoices]=await Promise.all(["appointments","tasks","invoices"].map(readRows));
+      const items=[];
+      for(const a of appointments){if(!["requested","scheduled"].includes(a.status)||!a.date||!a.time)continue;const at=new Date(a.date+"T"+a.time+":00");if(!Number.isNaN(at.getTime())&&at>=now&&at<=horizon)items.push({type:"appointment",id:a.id,title:a.title||"Appointment",at:at.toISOString(),status:a.status,detail:a.phone||a.name||""});}
+      for(const t of tasks){if(t.status==="done"||!t.dueDate)continue;const at=new Date(t.dueDate+"T23:59:59");if(!Number.isNaN(at.getTime())&&at<=horizon)items.push({type:"task",id:t.id,title:t.title||"Task due",at:at.toISOString(),status:at<now?"overdue":"upcoming",detail:t.assignedTo||""});}
+      for(const inv of invoices){if(["paid","cancelled"].includes(inv.status)||!inv.dueDate)continue;const at=new Date(inv.dueDate+"T23:59:59");if(!Number.isNaN(at.getTime())&&at<=horizon)items.push({type:"invoice",id:inv.id,title:inv.title||"Invoice due",at:at.toISOString(),status:at<now?"overdue":inv.status,detail:(inv.currency||"USD")+" "+inv.amount});}
+      items.sort((a,b)=>Date.parse(a.at)-Date.parse(b.at));
+      return send(res,200,{items,total:items.length,generatedAt:now.toISOString(),windowDays:7});
+    }
     if(url.pathname==="/api/followups" && req.method==="GET"){
       const now=Date.now();
       const items=leads.filter(x=>x.followUpAt).map(x=>({...x,followUpState:Date.parse(x.followUpAt)<=now?"due":"upcoming"})).sort((a,b)=>Date.parse(a.followUpAt)-Date.parse(b.followUpAt));
