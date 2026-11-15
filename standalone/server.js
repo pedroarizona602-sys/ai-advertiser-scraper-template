@@ -101,6 +101,18 @@ const server = http.createServer(async (req,res) => {
       lead.ghlContactId=contactId; lead.ghlSyncedAt=new Date().toISOString(); await persist();
       return send(res,200,{ok:true,contactId,created:result.new??null});
     }
+    const salesKitMatch=url.pathname.match(/^\\/api\\/sales-kit\\/([\\w-]+)$/);
+    if (salesKitMatch && req.method==="GET") {
+      const lead=leads.find(x=>x.id===salesKitMatch[1]);
+      if(!lead) return send(res,404,{error:"Lead not found"});
+      const missing=lead.website?"":"No website is listed on the public business profile";
+      const subject="A quick website opportunity for "+lead.name;
+      const opener="Hi "+lead.name+", I came across your business in "+(lead.city||"your area")+" and wanted to reach out.";
+      const value=lead.website?"I noticed an opportunity to make it easier for local customers to request quotes and contact you from their phones.":"I couldn't find a website listed for your business, which may make it harder for customers to see your services and request a quote.";
+      const pitch=opener+" "+value+" Nexora Smart Digital builds mobile-friendly websites with clear calls to action and lead capture. Would you be open to seeing a free custom website preview?";
+      const callScript="Hi, is this "+lead.name+"? My name is calling from Nexora Smart Digital. We help local service businesses turn more website visitors into quote requests. "+(missing? "I couldn't find a website listed for your business.":"I noticed a few opportunities to improve how customers contact you online.")+" Would you be interested in a free custom website preview?";
+      return send(res,200,{lead:{id:lead.id,name:lead.name,phone:lead.phone,website:lead.website,city:lead.city},subject,emailDraft:pitch,callScript,opportunity:missing||"Improve mobile contact and quote-request conversion",recommendedNextStep:"Review the business website and public details before contacting. Personalize this draft and obtain approval before sending.",claimsToVerify:["Current website quality and mobile experience","Services and service area","Existing quote or booking process"]});
+    }
     if (url.pathname === "/api/qualification" && req.method === "POST") {
       const body=await readBody(req), ids=Array.isArray(body.ids)?new Set(body.ids):null;
       let updated=0;
@@ -150,9 +162,10 @@ const server = http.createServer(async (req,res) => {
     if (match && req.method==="PATCH") {
       const body=await readBody(req), item=leads.find(x=>x.id===match[1]);
       if (!item) return send(res,404,{error:"Lead not found"});
-      for (const key of ["status","qualified","notes"]) if (key in body) item[key]=body[key];
       if ("status" in body && !["new","contacted","qualified","customer","not_a_fit"].includes(body.status)) return send(res,400,{error:"Invalid lead status"});
       if ("qualified" in body && typeof body.qualified!=="boolean") return send(res,400,{error:"Qualified must be true or false"});
+      if ("notes" in body && typeof body.notes!=="string") return send(res,400,{error:"Notes must be text"});
+      for (const key of ["status","qualified","notes"]) if (key in body) item[key]=body[key];
       await persist(); return send(res,200,{lead:item});
     }
     if (match && req.method==="DELETE") {
