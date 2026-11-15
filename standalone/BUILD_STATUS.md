@@ -9,11 +9,13 @@ This file is a development ledger, not a claim that the application is productio
 - Heuristic lead scoring endpoint based on website presence, phone, rating, review count, address, and lead status
 - Persistent JSON collections for clients, appointments, tasks, invoices, approvals, outreach drafts, proposals, website projects, and call logs
 - User-confirmed GoHighLevel contact upsert for qualified leads (requires sub-account token with contacts.write and a location ID)
+- Per-lead sales preparation kit with editable email and call-script drafts
+- Manual website audit checklist with transparent observation-based scoring (not an automated scan)
 - Dashboard cards for lead pipeline and operations records
 
 ## Still to build
 - Complete polished UI for every collection, including edit/detail views and searchable lists
-- Real website audit/capture and AI-powered qualification with transparent evidence
+- Automated website audit/capture and AI-powered qualification with verified evidence
 - GoHighLevel pipeline/opportunity sync, conversations, workflow enrollment, and activity history
 - Calendar provider integration with availability checks, booking, reminders, cancellation, and timezone handling
 - Payment provider integration, invoice creation, payment links, webhook reconciliation, and accounting-safe ledger
