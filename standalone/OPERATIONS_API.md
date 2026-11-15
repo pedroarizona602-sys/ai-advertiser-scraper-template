@@ -29,12 +29,12 @@ Approval records require an action and description. Outreach drafts require chan
 - GoHighLevel: `GHL_API_KEY` and `GHL_LOCATION_ID`
 - Voice provider: `VOICE_PROVIDER_API_KEY`
 
-Presence checks do not prove credentials are valid. GoHighLevel and voice provider APIs are not yet wired. Never commit secrets to source control.
+Presence checks do not prove credentials are valid. GoHighLevel contact upsert is implemented at `POST /api/integrations/highlevel/sync/{leadId}` and uses `GHL_API_KEY` (or `GHL_ACCESS_TOKEN`) plus `GHL_LOCATION_ID`. The token must be a sub-account Private Integration Token or OAuth access token with `contacts.write`. The dashboard sync action requires a deliberate confirmation; qualified leads only are sent. Never commit secrets to source control.
 
 ## Current boundaries
 
 - Google Places search is implemented but requires a configured API key and billing-enabled project.
-- No GoHighLevel records are synced.
+- GoHighLevel contact upsert is available after a valid token and location ID are configured; sync is user-triggered.
 - No external calendar is connected and no appointments are booked.
 - Invoice records do not charge cards or create payment links.
 - Outreach records are drafts only; no messages are sent.
