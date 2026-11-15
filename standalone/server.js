@@ -32,10 +32,36 @@ const readBody = async req => {
   return raw ? JSON.parse(raw) : {};
 };
 function authorized(req) {
-  if (!ADMIN_PASSWORD) return false;
+  if (!ADMIN_PASSWORD || ADMIN_PASSWORD.length < 16) return false;
   const value = req.headers.authorization || "";
   if (!value.startsWith("Basic ")) return false;
-  try { return Buffer.from(value.slice(6), "base64").toString().split(":").slice(1).join(":") === ADMIN_PASSWORD; } catch { return false; }
+  try {
+    const decoded = Buffer.from(value.slice(6), "base64").toString("utf8");
+    const separator = decoded.indexOf(":");
+    if (separator < 1) return false;
+    const supplied = Buffer.from(decoded.slice(separator + 1));
+    const expected = Buffer.from(ADMIN_PASSWORD);
+    return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+  } catch { return false; }
+}
+function qualifyLead(lead) {
+  let score = 0;
+  const reasons = [];
+  if (!lead.website) { score += 35; reasons.push("No website listed"); }
+  else { score += 5; reasons.push("Website listed"); }
+  if (lead.phone) { score += 15; reasons.push("Phone number available"); }
+  if (typeof lead.rating === "number") {
+    if (lead.rating >= 4.5) score += 15;
+    else if (lead.rating >= 4) score += 10;
+    else if (lead.rating < 3.5) score += 5;
+    reasons.push("Public rating: " + lead.rating);
+  }
+  if (Number(lead.reviewCount) >= 20) score += 10;
+  else if (Number(lead.reviewCount) > 0) score += 5;
+  if (lead.address) score += 5;
+  if (lead.status === "new") score += 5;
+  score = Math.min(100, score);
+  return { score, tier: score >= 65 ? "high" : score >= 40 ? "medium" : "low", reasons };
 }
 function cleanPlace(p, niche, location) {
   const phone = p.nationalPhoneNumber || p.internationalPhoneNumber || "";
@@ -54,7 +80,19 @@ const server = http.createServer(async (req,res) => {
     if (req.method === "OPTIONS") { res.writeHead(204, {"access-control-allow-methods":"GET,POST,PATCH,DELETE,OPTIONS","access-control-allow-headers":"Content-Type,Authorization"}); return res.end(); }
     if (url.pathname === "/health") return send(res,200,{ok:true,service:"nexora-lead-engine",savedLeads:leads.length});
     if (!authorized(req)) { res.writeHead(401, {"www-authenticate":'Basic realm="Nexora Lead Engine"',"content-type":"application/json"}); return res.end(JSON.stringify({error:"Sign in required"})); }
-    if (url.pathname === "/api/config" && req.method === "GET") return send(res,200,{placesReady:Boolean(GOOGLE_PLACES_API_KEY),googlePlacesConfigured:Boolean(GOOGLE_PLACES_API_KEY),goHighLevelConfigured:Boolean(GHL_API_KEY && GHL_LOCATION_ID),voiceConfigured:Boolean(process.env.VOICE_PROVIDER_API_KEY),savedLeads:leads.length});
+    if (url.pathname === "/api/config" && req.method === "GET") return send(res,200,{placesReady:Boolean(GOOGLE_PLACES_API_KEY),googlePlacesConfigured:Boolean(GOOGLE_PLACES_API_KEY),goHighLevelConfigured:Boolean(GHL_API_KEY && GHL_LOCATION_ID),voiceConfigured:Boolean(process.env.VOICE_PROVIDER_API_KEY),savedLeads:leads.length,securePasswordConfigured:ADMIN_PASSWORD.length>=16});
+    if (url.pathname === "/api/qualification" && req.method === "POST") {
+      const body=await readBody(req), ids=Array.isArray(body.ids)?new Set(body.ids):null;
+      let updated=0;
+      for (const lead of leads) {
+        if (ids && !ids.has(lead.id)) continue;
+        const result=qualifyLead(lead);
+        lead.score=result.score; lead.scoreTier=result.tier; lead.scoreReasons=result.reasons;
+        lead.qualified=result.score>=60; lead.scoredAt=new Date().toISOString(); updated++;
+      }
+      await persist();
+      return send(res,200,{updated,leads:leads.map(x=>({id:x.id,score:x.score,scoreTier:x.scoreTier,qualified:x.qualified}))});
+    }
     if (await handleWorkflow(req,res,url,send,readBody)) return;
     if (url.pathname === "/api/leads" && req.method === "GET") {
       const q=(url.searchParams.get("q")||"").toLowerCase();
@@ -66,6 +104,7 @@ const server = http.createServer(async (req,res) => {
       if (!GOOGLE_PLACES_API_KEY) return send(res,503,{error:"Lead discovery is not configured yet. Add GOOGLE_PLACES_API_KEY in the service environment."});
       const body=await readBody(req), niche=String(body.niche||"").trim(), location=String(body.location||"").trim();
       if (!niche||!location) return send(res,400,{error:"Enter an industry and a city or area."});
+      if (niche.length>100 || location.length>120) return send(res,400,{error:"Search terms are too long."});
       const max=Math.min(20,Math.max(1,Number(body.maxResults)||20));
       const response=await fetch("https://places.googleapis.com/v1/places:searchText",{
         method:"POST",headers:{"Content-Type":"application/json","X-Goog-Api-Key":GOOGLE_PLACES_API_KEY,"X-Goog-FieldMask":"places.id,places.displayName,places.nationalPhoneNumber,places.internationalPhoneNumber,places.websiteUri,places.formattedAddress,places.rating,places.userRatingCount,places.googleMapsUri"},
@@ -92,6 +131,8 @@ const server = http.createServer(async (req,res) => {
       const body=await readBody(req), item=leads.find(x=>x.id===match[1]);
       if (!item) return send(res,404,{error:"Lead not found"});
       for (const key of ["status","qualified","notes"]) if (key in body) item[key]=body[key];
+      if ("status" in body && !["new","contacted","qualified","customer","not_a_fit"].includes(body.status)) return send(res,400,{error:"Invalid lead status"});
+      if ("qualified" in body && typeof body.qualified!=="boolean") return send(res,400,{error:"Qualified must be true or false"});
       await persist(); return send(res,200,{lead:item});
     }
     if (match && req.method==="DELETE") {
