@@ -18,6 +18,7 @@ This file is a development ledger, not a claim that the application is productio
 - Cinematic black-and-gold JARVIS-inspired command center interface with responsive layouts
 - Persistent lead activity timeline, manual notes, and automatic status/qualification change events
 - Per-lead follow-up scheduling with a due/upcoming follow-up queue API and dashboard action
+- Unified seven-day reminders API for upcoming appointments, due/overdue tasks, and invoice due dates
 - Appointment validation with overlapping-time protection
 - Invoice amount and currency validation
 - Downloadable iCalendar export for scheduled appointments
