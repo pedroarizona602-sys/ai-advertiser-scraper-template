@@ -177,6 +177,11 @@ const server = http.createServer(async (req,res) => {
       await logLeadActivity(lead.id,"note",message);
       return send(res,201,{ok:true});
     }
+    if(url.pathname==="/api/followups" && req.method==="GET"){
+      const now=Date.now();
+      const items=leads.filter(x=>x.followUpAt).map(x=>({...x,followUpState:Date.parse(x.followUpAt)<=now?"due":"upcoming"})).sort((a,b)=>Date.parse(a.followUpAt)-Date.parse(b.followUpAt));
+      return send(res,200,{items,due:items.filter(x=>x.followUpState==="due").length,upcoming:items.filter(x=>x.followUpState==="upcoming").length});
+    }
     if (url.pathname === "/api/leads" && req.method === "GET") {
       const q=(url.searchParams.get("q")||"").toLowerCase();
       const status=url.searchParams.get("status")||"";
@@ -216,8 +221,10 @@ const server = http.createServer(async (req,res) => {
       if ("status" in body && !["new","contacted","qualified","customer","not_a_fit"].includes(body.status)) return send(res,400,{error:"Invalid lead status"});
       if ("qualified" in body && typeof body.qualified!=="boolean") return send(res,400,{error:"Qualified must be true or false"});
       if ("notes" in body && typeof body.notes!=="string") return send(res,400,{error:"Notes must be text"});
+      if ("followUpAt" in body && body.followUpAt!==null && (!Number.isFinite(Date.parse(body.followUpAt)))) return send(res,400,{error:"Follow-up date must be a valid ISO date/time."});
+      if ("followUpNote" in body && typeof body.followUpNote!=="string") return send(res,400,{error:"Follow-up note must be text"});
       const changed=[];
-      for (const key of ["status","qualified","notes"]) if (key in body && item[key]!==body[key]) { item[key]=body[key]; changed.push(key); }
+      for (const key of ["status","qualified","notes","followUpAt","followUpNote"]) if (key in body && item[key]!==body[key]) { item[key]=body[key]; changed.push(key); }
       await persist();
       if(changed.length) await logLeadActivity(item.id,"updated","Updated "+changed.join(", "),{fields:changed});
       return send(res,200,{lead:item});
