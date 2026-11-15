@@ -20,18 +20,21 @@ This file is a development ledger, not a claim that the application is productio
 - Invoice amount and currency validation
 - Downloadable iCalendar export for scheduled appointments
 - Dashboard cards for lead pipeline and operations records
+- Central integration-readiness registry covering CRM workflows, automated audits, calendar, payments, voice, outreach, publishing, AI commands, and backups; reports missing environment configuration without exposing secrets
+- Authenticated system backup endpoint that snapshots lead, activity, CRM, scheduling, finance, approval, outreach, proposal, project, call, and audit collections; retains the ten newest snapshots
+- Security response headers on application requests
 
 ## Still to build
 - Complete polished UI for every collection, including edit/detail views and searchable lists
 - Dedicated lead detail workspace with a full timeline, editable follow-up dates, and contact history
-- Automated website audit/capture and AI-powered qualification with verified evidence
+- Automated website audit/capture and AI-powered qualification with verified evidence (manual audit checklist exists; automated provider integration remains outstanding)
 - GoHighLevel pipeline/opportunity sync, conversations, workflow enrollment, and activity history
 - Calendar provider integration with availability checks, booking, reminders, cancellation, and timezone handling
 - Payment provider integration, invoice creation, payment links, webhook reconciliation, and accounting-safe ledger
 - Voice provider integration, inbound call handling, consent, call summaries, transfer, and booking
 - Outreach provider integration, suppression/opt-out handling, compliance checks, approval gates, sending, and delivery tracking
 - Website generation and publishing pipeline, revision approvals, client intake, asset management, and deployment status
-- User/team roles, audit trail, backups, restore, and operational monitoring
+- User/team roles, expanded audit trail, backup restore, and operational monitoring (manual backup snapshots now exist)
 - Full responsive mobile UI and accessibility pass
 
 ## Deployment and verification
