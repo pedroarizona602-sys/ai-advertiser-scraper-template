@@ -1,9 +1,10 @@
 import http from "node:http";
-import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename, copyFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { createWorkflowStore } from "./workflow-store.js";
+import { getIntegrationStatus } from "./integrations.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3000);
@@ -91,9 +92,13 @@ const server = http.createServer(async (req,res) => {
   try {
     const url = new URL(req.url, "http://localhost");
     if (req.method === "OPTIONS") { res.writeHead(204, {"access-control-allow-methods":"GET,POST,PATCH,DELETE,OPTIONS","access-control-allow-headers":"Content-Type,Authorization"}); return res.end(); }
+    res.setHeader("x-content-type-options","nosniff"); res.setHeader("referrer-policy","no-referrer"); res.setHeader("x-frame-options","DENY"); res.setHeader("permissions-policy","camera=(), microphone=(), geolocation=()");
     if (url.pathname === "/health") return send(res,200,{ok:true,service:"nexora-lead-engine",savedLeads:leads.length});
     if (!authorized(req)) { res.writeHead(401, {"www-authenticate":'Basic realm="Nexora Lead Engine"',"content-type":"application/json"}); return res.end(JSON.stringify({error:"Sign in required"})); }
     if (url.pathname === "/api/config" && req.method === "GET") return send(res,200,{placesReady:Boolean(GOOGLE_PLACES_API_KEY),googlePlacesConfigured:Boolean(GOOGLE_PLACES_API_KEY),goHighLevelConfigured:Boolean(GHL_API_KEY && GHL_LOCATION_ID),voiceConfigured:Boolean(process.env.VOICE_PROVIDER_API_KEY),savedLeads:leads.length,securePasswordConfigured:ADMIN_PASSWORD.length>=16});
+    if (url.pathname === "/api/integrations/status" && req.method === "GET") return send(res,200,{integrations:getIntegrationStatus(process.env),generatedAt:new Date().toISOString()});
+    if (url.pathname === "/api/system/backups" && req.method === "GET") { const dir=path.join(DATA_DIR,"backups"); await mkdir(dir,{recursive:true}); const files=(await readdir(dir)).filter(x=>x.endsWith(".json")).sort().reverse(); return send(res,200,{backups:await Promise.all(files.map(async name=>({name,size:(await stat(path.join(dir,name))).size}))) }); }
+    if (url.pathname === "/api/system/backups" && req.method === "POST") { const dir=path.join(DATA_DIR,"backups"); await mkdir(dir,{recursive:true}); const stamp=new Date().toISOString().replace(/[:.]/g,"-"); const files=["leads.json","lead-activity.json",...["clients","appointments","tasks","invoices","approvals","outreach","proposals","projects","callLogs","audits"].map(x=>x+".json")]; const snapshot={createdAt:new Date().toISOString(),files:{}}; for(const name of files){try{snapshot.files[name]=JSON.parse(await readFile(path.join(DATA_DIR,name),"utf8"));}catch{snapshot.files[name]=[];}} const target=path.join(dir,"nexora-backup-"+stamp+".json"); await writeFile(target,JSON.stringify(snapshot,null,2),"utf8"); const all=(await readdir(dir)).filter(x=>x.endsWith(".json")).sort().reverse(); for(const stale of all.slice(10)){const stalePath=path.join(dir,stale);await (await import("node:fs/promises")).unlink(stalePath);} return send(res,201,{ok:true,name:path.basename(target),recordCollections:Object.keys(snapshot.files).length,retainedBackups:Math.min(all.length+1,10)}); }
     if (url.pathname === "/api/dashboard/summary" && req.method === "GET") {
       const readCollection=async name=>{try{const value=JSON.parse(await readFile(path.join(DATA_DIR,name+".json"),"utf8"));return Array.isArray(value)?value:[]}catch{return []}};
       const [clients,appointments,tasks,invoices,approvals,outreach,proposals,projects,callLogs]=await Promise.all(["clients","appointments","tasks","invoices","approvals","outreach","proposals","projects","callLogs"].map(readCollection));
