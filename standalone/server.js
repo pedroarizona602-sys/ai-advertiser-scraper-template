@@ -23,6 +23,19 @@ async function persist() {
   await writeFile(temp, JSON.stringify(leads, null, 2), "utf8");
   await rename(temp, DB_FILE);
 }
+const ACTIVITY_FILE = path.join(DATA_DIR, "lead-activity.json");
+let leadActivity = [];
+try { leadActivity = JSON.parse(await readFile(ACTIVITY_FILE, "utf8")); if (!Array.isArray(leadActivity)) leadActivity = []; } catch { leadActivity = []; }
+async function persistActivity() {
+  const temp = ACTIVITY_FILE + ".tmp";
+  await writeFile(temp, JSON.stringify(leadActivity, null, 2), "utf8");
+  await rename(temp, ACTIVITY_FILE);
+}
+async function logLeadActivity(leadId, type, message, metadata = {}) {
+  leadActivity.unshift({ id: crypto.randomUUID(), leadId, type, message: String(message).slice(0, 2000), metadata, createdAt: new Date().toISOString() });
+  if (leadActivity.length > 10000) leadActivity.length = 10000;
+  await persistActivity();
+}
 const send = (res, status, data, type="application/json; charset=utf-8") => {
   res.writeHead(status, { "content-type": type, "cache-control": "no-store", "access-control-allow-origin": "null" });
   res.end(type.startsWith("application/json") ? JSON.stringify(data) : data);
@@ -135,6 +148,21 @@ const server = http.createServer(async (req,res) => {
       return send(res,200,{updated,leads:leads.map(x=>({id:x.id,score:x.score,scoreTier:x.scoreTier,qualified:x.qualified}))});
     }
     if (await handleWorkflow(req,res,url,send,readBody)) return;
+    const activityMatch=url.pathname.match(/^\\/api\\/leads\\/([\\w-]+)\\/activity$/);
+    if(activityMatch && req.method==="GET"){
+      const lead=leads.find(x=>x.id===activityMatch[1]);
+      if(!lead)return send(res,404,{error:"Lead not found"});
+      return send(res,200,{items:leadActivity.filter(x=>x.leadId===lead.id)});
+    }
+    if(activityMatch && req.method==="POST"){
+      const lead=leads.find(x=>x.id===activityMatch[1]);
+      if(!lead)return send(res,404,{error:"Lead not found"});
+      const body=await readBody(req), message=String(body.message||"").trim();
+      if(!message)return send(res,400,{error:"Enter an activity note."});
+      if(message.length>2000)return send(res,400,{error:"Activity notes must be 2,000 characters or fewer."});
+      await logLeadActivity(lead.id,"note",message);
+      return send(res,201,{ok:true});
+    }
     if (url.pathname === "/api/leads" && req.method === "GET") {
       const q=(url.searchParams.get("q")||"").toLowerCase();
       const status=url.searchParams.get("status")||"";
@@ -165,7 +193,7 @@ const server = http.createServer(async (req,res) => {
         const duplicate=leads.some(x=>(item.sourceId&&x.sourceId===item.sourceId)||(!item.sourceId&&x.name===item.name&&x.address===item.address));
         if (!duplicate) { leads.unshift({...item,id:crypto.randomUUID(),status:"new",qualified:false,createdAt:new Date().toISOString()}); added++; }
       }
-      await persist(); return send(res,200,{added,total:leads.length});
+      await persist(); if(added) await logLeadActivity("system","import","Imported "+added+" leads",{count:added}); return send(res,200,{added,total:leads.length});
     }
     const match=url.pathname.match(/^\/api\/leads\/([\w-]+)$/);
     if (match && req.method==="PATCH") {
@@ -174,8 +202,11 @@ const server = http.createServer(async (req,res) => {
       if ("status" in body && !["new","contacted","qualified","customer","not_a_fit"].includes(body.status)) return send(res,400,{error:"Invalid lead status"});
       if ("qualified" in body && typeof body.qualified!=="boolean") return send(res,400,{error:"Qualified must be true or false"});
       if ("notes" in body && typeof body.notes!=="string") return send(res,400,{error:"Notes must be text"});
-      for (const key of ["status","qualified","notes"]) if (key in body) item[key]=body[key];
-      await persist(); return send(res,200,{lead:item});
+      const changed=[];
+      for (const key of ["status","qualified","notes"]) if (key in body && item[key]!==body[key]) { item[key]=body[key]; changed.push(key); }
+      await persist();
+      if(changed.length) await logLeadActivity(item.id,"updated","Updated "+changed.join(", "),{fields:changed});
+      return send(res,200,{lead:item});
     }
     if (match && req.method==="DELETE") {
       const before=leads.length; leads=leads.filter(x=>x.id!==match[1]);
