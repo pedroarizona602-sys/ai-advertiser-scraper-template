@@ -3,6 +3,7 @@ import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
+import { createWorkflowStore } from "./workflow-store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3000);
@@ -10,9 +11,12 @@ const DATA_DIR = process.env.DATA_DIR || (process.env.RAILWAY_VOLUME_MOUNT_PATH 
 const DB_FILE = path.join(DATA_DIR, "leads.json");
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
+const GHL_API_KEY = process.env.GHL_API_KEY || "";
+const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || "";
 let leads = [];
 
 await mkdir(DATA_DIR, { recursive: true });
+const handleWorkflow = createWorkflowStore(DATA_DIR);
 try { leads = JSON.parse(await readFile(DB_FILE, "utf8")); if (!Array.isArray(leads)) leads = []; } catch { leads = []; }
 async function persist() {
   const temp = DB_FILE + ".tmp";
@@ -50,7 +54,8 @@ const server = http.createServer(async (req,res) => {
     if (req.method === "OPTIONS") { res.writeHead(204, {"access-control-allow-methods":"GET,POST,PATCH,DELETE,OPTIONS","access-control-allow-headers":"Content-Type,Authorization"}); return res.end(); }
     if (url.pathname === "/health") return send(res,200,{ok:true,service:"nexora-lead-engine",savedLeads:leads.length});
     if (!authorized(req)) { res.writeHead(401, {"www-authenticate":'Basic realm="Nexora Lead Engine"',"content-type":"application/json"}); return res.end(JSON.stringify({error:"Sign in required"})); }
-    if (url.pathname === "/api/config" && req.method === "GET") return send(res,200,{placesReady:Boolean(GOOGLE_PLACES_API_KEY),savedLeads:leads.length});
+    if (url.pathname === "/api/config" && req.method === "GET") return send(res,200,{placesReady:Boolean(GOOGLE_PLACES_API_KEY),googlePlacesConfigured:Boolean(GOOGLE_PLACES_API_KEY),goHighLevelConfigured:Boolean(GHL_API_KEY && GHL_LOCATION_ID),voiceConfigured:Boolean(process.env.VOICE_PROVIDER_API_KEY),savedLeads:leads.length});
+    if (await handleWorkflow(req,res,url,send,readBody)) return;
     if (url.pathname === "/api/leads" && req.method === "GET") {
       const q=(url.searchParams.get("q")||"").toLowerCase();
       const status=url.searchParams.get("status")||"";
