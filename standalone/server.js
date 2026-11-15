@@ -3,6 +3,8 @@ import { readFile, writeFile, mkdir, rename, copyFile, readdir, stat } from "nod
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { createWorkflowStore } from "./workflow-store.js";
 import { getIntegrationStatus } from "./integrations.js";
 
@@ -88,6 +90,71 @@ function cleanPlace(p, niche, location) {
     createdAt: new Date().toISOString()
   };
 }
+
+function isPrivateAddress(address) {
+  if (isIP(address)===4) {
+    const p=address.split(".").map(Number);
+    return p[0]===0 || p[0]===10 || p[0]===127 || (p[0]===169&&p[1]===254) || (p[0]===172&&p[1]>=16&&p[1]<=31) || (p[0]===192&&p[1]===168) || (p[0]===100&&p[1]>=64&&p[1]<=127) || p[0]>=224;
+  }
+  const a=address.toLowerCase();
+  return a==="::1" || a==="::" || a.startsWith("fc") || a.startsWith("fd") || /^fe[89ab]/.test(a) || a.startsWith("::ffff:127.") || a.startsWith("::ffff:10.") || a.startsWith("::ffff:192.168.");
+}
+async function checkedPublicUrl(raw) {
+  let u; try { u=new URL(raw); } catch { throw new Error("Enter a valid website URL."); }
+  if (!["http:","https:"].includes(u.protocol) || u.username || u.password) throw new Error("Only public HTTP or HTTPS website URLs are supported.");
+  if (u.port && !["80","443"].includes(u.port)) throw new Error("Only standard web ports are allowed.");
+  const host=u.hostname.toLowerCase().replace(/^\[|\]$/g,"");
+  if (host==="localhost" || host.endsWith(".localhost") || host.endsWith(".local")) throw new Error("Private and local network addresses cannot be scanned.");
+  const addresses=isIP(host)?[{address:host}]:await lookup(host,{all:true,verbatim:true});
+  if (!addresses.length || addresses.some(x=>isPrivateAddress(x.address))) throw new Error("The website resolves to a private or restricted network address.");
+  return u;
+}
+async function readLimited(response, maxBytes=1_000_000) {
+  const reader=response.body?.getReader(); if(!reader)return "";
+  const chunks=[]; let size=0;
+  while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>maxBytes){await reader.cancel();throw new Error("Website response is larger than the 1 MB audit limit.");}chunks.push(value);}
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
+function inspectWebsiteHtml(html, finalUrl, status) {
+  const title=(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||"").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
+  const description=html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)/i)?.[1] || html.match(/<meta[^>]+content=["']([^"']*)["'][^>]+name=["']description["']/i)?.[1] || "";
+  const hasViewport=/<meta[^>]+name=["']viewport["']/i.test(html);
+  const h1=(html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)?.[1]||"").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
+  const hasForm=/<form\b/i.test(html);
+  const hasPhone=/tel:/i.test(html);
+  const hasEmail=/mailto:/i.test(html);
+  const cta=/(book now|book online|get a quote|request a quote|contact us|call now|schedule|free estimate|call today)/i.test(html.replace(/<[^>]+>/g," "));
+  const serviceWords=/(services|what we do|our work|landscap|roof|paint|plumb|clean|construct|tree service|pressure wash)/i.test(html);
+  const checks=[
+    {key:"https",label:"HTTPS",pass:finalUrl.protocol==="https:",detail:finalUrl.protocol==="https:"?"Website uses HTTPS":"Website is served without HTTPS"},
+    {key:"mobileFriendly",label:"Mobile viewport",pass:hasViewport,detail:hasViewport?"Viewport metadata found":"No viewport metadata detected"},
+    {key:"clearCTA",label:"Contact / booking call to action",pass:cta,detail:cta?"A common conversion phrase was found":"No obvious booking, quote, or contact CTA phrase detected"},
+    {key:"contactForm",label:"Lead capture",pass:hasForm||hasPhone||hasEmail,detail:hasForm?"HTML form detected":hasPhone||hasEmail?"Phone or email link detected":"No HTML form, phone link, or email link detected"},
+    {key:"pageTitle",label:"Page title",pass:Boolean(title),detail:title||"No page title found"},
+    {key:"metaDescription",label:"Meta description",pass:Boolean(description),detail:description||"No meta description found"},
+    {key:"mainHeading",label:"Main heading",pass:Boolean(h1),detail:h1||"No H1 heading found"},
+    {key:"serviceContent",label:"Service content",pass:serviceWords,detail:serviceWords?"Service-related wording detected":"Could not detect common service-related wording"}
+  ];
+  const score=Math.round(checks.filter(x=>x.pass).length/checks.length*100);
+  return {url:finalUrl.href,httpStatus:status,title,description,heading:h1,score,checks,findings:checks.filter(x=>!x.pass).map(x=>x.detail),limitations:"Automated HTML-level screening only. This does not test real mobile rendering, accessibility, page speed, SEO rankings, security vulnerabilities, or conversion performance."};
+}
+async function runWebsiteAudit(rawUrl) {
+  let current=await checkedPublicUrl(rawUrl), response;
+  for(let redirects=0;redirects<=3;redirects++){
+    response=await fetch(current,{redirect:"manual",signal:AbortSignal.timeout(12000),headers:{"user-agent":"NexoraWebsiteAudit/1.0 (+https://nexorasmartdigital.com)","accept":"text/html,application/xhtml+xml"}});
+    if([301,302,303,307,308].includes(response.status)){
+      const location=response.headers.get("location");if(!location)throw new Error("Website returned a redirect without a destination.");
+      if(redirects===3)throw new Error("Website redirected too many times.");
+      current=await checkedPublicUrl(new URL(location,current).href);continue;
+    }
+    break;
+  }
+  const type=response.headers.get("content-type")||"";
+  if(!type.includes("text/html")&&!type.includes("application/xhtml+xml"))throw new Error("The URL did not return an HTML webpage.");
+  const html=await readLimited(response);
+  return inspectWebsiteHtml(html,current,response.status);
+}
+
 const server = http.createServer(async (req,res) => {
   try {
     const url = new URL(req.url, "http://localhost");
@@ -96,6 +163,18 @@ const server = http.createServer(async (req,res) => {
     if (url.pathname === "/health") return send(res,200,{ok:true,service:"nexora-lead-engine",savedLeads:leads.length});
     if (!authorized(req)) { res.writeHead(401, {"www-authenticate":'Basic realm="Nexora Lead Engine"',"content-type":"application/json"}); return res.end(JSON.stringify({error:"Sign in required"})); }
     if (url.pathname === "/api/config" && req.method === "GET") return send(res,200,{placesReady:Boolean(GOOGLE_PLACES_API_KEY),googlePlacesConfigured:Boolean(GOOGLE_PLACES_API_KEY),goHighLevelConfigured:Boolean(GHL_API_KEY && GHL_LOCATION_ID),voiceConfigured:Boolean(process.env.VOICE_PROVIDER_API_KEY),savedLeads:leads.length,securePasswordConfigured:ADMIN_PASSWORD.length>=16});
+    if (url.pathname === "/api/audits/scan" && req.method === "POST") {
+      const body=await readBody(req), websiteUrl=String(body.websiteUrl||"").trim(), name=String(body.name||"").trim();
+      if(!websiteUrl)return send(res,400,{error:"Enter a website URL to audit."});
+      if(name.length>160)return send(res,400,{error:"Business name is too long."});
+      try{
+        const result=await runWebsiteAudit(websiteUrl);
+        const record={id:crypto.randomUUID(),name:name||new URL(result.url).hostname,websiteUrl:result.url,status:"reviewed",auditScore:result.score,checks:result.checks,findings:result.findings,description:result.description,title:result.title,heading:result.heading,httpStatus:result.httpStatus,limitations:result.limitations,createdAt:new Date().toISOString(),source:"automated_html_audit"};
+        const file=path.join(DATA_DIR,"audits.json");let audits=[];try{audits=JSON.parse(await readFile(file,"utf8"));if(!Array.isArray(audits))audits=[];}catch{}
+        audits.unshift(record);await writeFile(file+".tmp",JSON.stringify(audits,null,2),"utf8");await rename(file+".tmp",file);
+        return send(res,200,{audit:record});
+      }catch(error){return send(res,422,{error:error.message||"Website audit could not be completed."});}
+    }
     if (url.pathname === "/api/integrations/status" && req.method === "GET") return send(res,200,{integrations:getIntegrationStatus(process.env),generatedAt:new Date().toISOString()});
     if (url.pathname === "/api/system/backups" && req.method === "GET") { const dir=path.join(DATA_DIR,"backups"); await mkdir(dir,{recursive:true}); const files=(await readdir(dir)).filter(x=>x.endsWith(".json")).sort().reverse(); return send(res,200,{backups:await Promise.all(files.map(async name=>({name,size:(await stat(path.join(dir,name))).size}))) }); }
     if (url.pathname === "/api/system/backups" && req.method === "POST") { const dir=path.join(DATA_DIR,"backups"); await mkdir(dir,{recursive:true}); const stamp=new Date().toISOString().replace(/[:.]/g,"-"); const files=["leads.json","lead-activity.json",...["clients","appointments","tasks","invoices","approvals","outreach","proposals","projects","callLogs","audits"].map(x=>x+".json")]; const snapshot={createdAt:new Date().toISOString(),files:{}}; for(const name of files){try{snapshot.files[name]=JSON.parse(await readFile(path.join(DATA_DIR,name),"utf8"));}catch{snapshot.files[name]=[];}} const target=path.join(dir,"nexora-backup-"+stamp+".json"); await writeFile(target,JSON.stringify(snapshot,null,2),"utf8"); const all=(await readdir(dir)).filter(x=>x.endsWith(".json")).sort().reverse(); for(const stale of all.slice(10)){const stalePath=path.join(dir,stale);await (await import("node:fs/promises")).unlink(stalePath);} return send(res,201,{ok:true,name:path.basename(target),recordCollections:Object.keys(snapshot.files).length,retainedBackups:Math.min(all.length+1,10)}); }
