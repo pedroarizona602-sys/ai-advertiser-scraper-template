@@ -10,6 +10,8 @@ This file is a development ledger, not a claim that the application is productio
 - Persistent JSON collections for clients, appointments, tasks, invoices, approvals, outreach drafts, proposals, website projects, and call logs
 - User-confirmed GoHighLevel contact upsert for qualified leads (requires sub-account token with contacts.write and a location ID)
 - Per-lead sales preparation kit with editable email and call-script drafts
+- Client onboarding checklist generator that creates repeat-safe project tasks
+- Outreach records cannot be falsely marked sent without a delivery integration
 - Manual website audit checklist with transparent observation-based scoring (not an automated scan)
 - Dashboard cards for lead pipeline and operations records
 
