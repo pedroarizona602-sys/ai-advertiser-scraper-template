@@ -31,6 +31,34 @@ export function createWorkflowStore(dataDir) {
     const parts=url.pathname.split("/").filter(Boolean);
     if (parts[0]!=="api" || !TYPES.has(parts[1])) return false;
     const type=parts[1], id=parts[2];
+    if(type==="clients" && id==="onboarding" && req.method==="POST"){
+      const body=await readBody(req);
+      const clientId=String(body.clientId||"");
+      const clients=await load("clients");
+      const client=clients.find(x=>x.id===clientId);
+      if(!client){send(res,404,{error:"Client not found"});return true;}
+      const tasks=await load("tasks");
+      const checklist=[
+        ["Collect business details","Confirm business name, contact person, phone, email, address, and service area"],
+        ["Collect services and pricing","Gather service list, starting prices, and preferred calls to action"],
+        ["Collect brand assets","Request logo, brand colors, fonts, and approved photos"],
+        ["Confirm website requirements","Record pages, features, booking needs, and lead-capture requirements"],
+        ["Confirm domain and access","Confirm domain ownership and required hosting or DNS access"],
+        ["Prepare first website draft","Create the initial mobile-first website draft for internal review"],
+        ["Client review and revisions","Collect consolidated feedback and record requested changes"],
+        ["Obtain launch approval","Get explicit client approval before publishing"]
+      ];
+      const created=[];
+      for(const [title,description] of checklist){
+        if(tasks.some(t=>t.clientId===clientId&&t.title===title))continue;
+        const task={id:crypto.randomUUID(),clientId,title,description,status:"todo",priority:"normal",createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+        tasks.unshift(task);created.push(task);
+      }
+      client.status="onboarding";client.onboardingStartedAt=client.onboardingStartedAt||new Date().toISOString();client.updatedAt=new Date().toISOString();
+      await save("tasks",tasks);await save("clients",clients);
+      send(res,200,{client,createdTasks:created.length,totalOnboardingTasks:tasks.filter(t=>t.clientId===clientId&&checklist.some(([title])=>title===t.title)).length});
+      return true;
+    }
     if (req.method==="GET" && !id) {
       const rows=await load(type), status=url.searchParams.get("status")||"", q=(url.searchParams.get("q")||"").toLowerCase();
       const filtered=rows.filter(x=>(!status||x.status===status)&&(!q||JSON.stringify(x).toLowerCase().includes(q)));
