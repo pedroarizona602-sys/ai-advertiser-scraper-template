@@ -23,6 +23,7 @@ This file is a development ledger, not a claim that the application is productio
 - Central integration-readiness registry covering CRM workflows, automated audits, calendar, payments, voice, outreach, publishing, AI commands, and backups; reports missing environment configuration without exposing secrets
 - Authenticated system backup endpoint that snapshots lead, activity, CRM, scheduling, finance, approval, outreach, proposal, project, call, and audit collections; retains the ten newest snapshots
 - Security response headers on application requests
+- Command-center integration panel showing configured versus missing provider connections, plus a one-click authenticated backup action
 
 ## Still to build
 - Complete polished UI for every collection, including edit/detail views and searchable lists
