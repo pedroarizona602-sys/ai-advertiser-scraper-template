@@ -1,0 +1,344 @@
+import http from "node:http";
+import { readFile, writeFile, mkdir, rename, copyFile, readdir, stat } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import crypto from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+import { createWorkflowStore } from "./workflow-store.js";
+import { getIntegrationStatus } from "./integrations.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PORT = Number(process.env.PORT || 3000);
+const DATA_DIR = process.env.DATA_DIR || (process.env.RAILWAY_VOLUME_MOUNT_PATH ? path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH, "nexora") : path.join(__dirname, "data"));
+const DB_FILE = path.join(DATA_DIR, "leads.json");
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
+const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
+const GHL_API_KEY = process.env.GHL_API_KEY || process.env.GHL_ACCESS_TOKEN || "";
+const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || "";
+let leads = [];
+
+await mkdir(DATA_DIR, { recursive: true });
+const handleWorkflow = createWorkflowStore(DATA_DIR);
+try { leads = JSON.parse(await readFile(DB_FILE, "utf8")); if (!Array.isArray(leads)) leads = []; } catch { leads = []; }
+async function persist() {
+  const temp = DB_FILE + ".tmp";
+  await writeFile(temp, JSON.stringify(leads, null, 2), "utf8");
+  await rename(temp, DB_FILE);
+}
+const ACTIVITY_FILE = path.join(DATA_DIR, "lead-activity.json");
+let leadActivity = [];
+try { leadActivity = JSON.parse(await readFile(ACTIVITY_FILE, "utf8")); if (!Array.isArray(leadActivity)) leadActivity = []; } catch { leadActivity = []; }
+async function persistActivity() {
+  const temp = ACTIVITY_FILE + ".tmp";
+  await writeFile(temp, JSON.stringify(leadActivity, null, 2), "utf8");
+  await rename(temp, ACTIVITY_FILE);
+}
+async function logLeadActivity(leadId, type, message, metadata = {}) {
+  leadActivity.unshift({ id: crypto.randomUUID(), leadId, type, message: String(message).slice(0, 2000), metadata, createdAt: new Date().toISOString() });
+  if (leadActivity.length > 10000) leadActivity.length = 10000;
+  await persistActivity();
+}
+const send = (res, status, data, type="application/json; charset=utf-8") => {
+  res.writeHead(status, { "content-type": type, "cache-control": "no-store", "access-control-allow-origin": "null" });
+  res.end(type.startsWith("application/json") ? JSON.stringify(data) : data);
+};
+const readBody = async req => {
+  let raw=""; for await (const chunk of req) { raw += chunk; if (raw.length > 1_000_000) throw new Error("Request too large"); }
+  return raw ? JSON.parse(raw) : {};
+};
+function authorized(req) {
+  if (!ADMIN_PASSWORD || ADMIN_PASSWORD.length < 16) return false;
+  const value = req.headers.authorization || "";
+  if (!value.startsWith("Basic ")) return false;
+  try {
+    const decoded = Buffer.from(value.slice(6), "base64").toString("utf8");
+    const separator = decoded.indexOf(":");
+    if (separator < 1) return false;
+    const supplied = Buffer.from(decoded.slice(separator + 1));
+    const expected = Buffer.from(ADMIN_PASSWORD);
+    return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+  } catch { return false; }
+}
+function qualifyLead(lead) {
+  let score = 0;
+  const reasons = [];
+  if (!lead.website) { score += 35; reasons.push("No website listed"); }
+  else { score += 5; reasons.push("Website listed"); }
+  if (lead.phone) { score += 15; reasons.push("Phone number available"); }
+  if (typeof lead.rating === "number") {
+    if (lead.rating >= 4.5) score += 15;
+    else if (lead.rating >= 4) score += 10;
+    else if (lead.rating < 3.5) score += 5;
+    reasons.push("Public rating: " + lead.rating);
+  }
+  if (Number(lead.reviewCount) >= 20) score += 10;
+  else if (Number(lead.reviewCount) > 0) score += 5;
+  if (lead.address) score += 5;
+  if (lead.status === "new") score += 5;
+  score = Math.min(100, score);
+  return { score, tier: score >= 65 ? "high" : score >= 40 ? "medium" : "low", reasons };
+}
+function cleanPlace(p, niche, location) {
+  const phone = p.nationalPhoneNumber || p.internationalPhoneNumber || "";
+  const website = p.websiteUri || "";
+  return {
+    id: crypto.randomUUID(), sourceId: p.id || "", name: p.displayName?.text || "Unnamed business",
+    phone, website, address: p.formattedAddress || "", rating: p.rating ?? null,
+    reviewCount: p.userRatingCount ?? 0, mapsUrl: p.googleMapsUri || "",
+    niche, city: location, status: "new", qualified: false,
+    createdAt: new Date().toISOString()
+  };
+}
+
+function isPrivateAddress(address) {
+  if (isIP(address)===4) {
+    const p=address.split(".").map(Number);
+    return p[0]===0 || p[0]===10 || p[0]===127 || (p[0]===169&&p[1]===254) || (p[0]===172&&p[1]>=16&&p[1]<=31) || (p[0]===192&&p[1]===168) || (p[0]===100&&p[1]>=64&&p[1]<=127) || p[0]>=224;
+  }
+  const a=address.toLowerCase();
+  return a==="::1" || a==="::" || a.startsWith("fc") || a.startsWith("fd") || /^fe[89ab]/.test(a) || a.startsWith("::ffff:127.") || a.startsWith("::ffff:10.") || a.startsWith("::ffff:192.168.");
+}
+async function checkedPublicUrl(raw) {
+  let u; try { u=new URL(raw); } catch { throw new Error("Enter a valid website URL."); }
+  if (!["http:","https:"].includes(u.protocol) || u.username || u.password) throw new Error("Only public HTTP or HTTPS website URLs are supported.");
+  if (u.port && !["80","443"].includes(u.port)) throw new Error("Only standard web ports are allowed.");
+  const host=u.hostname.toLowerCase().replace(/^\[|\]$/g,"");
+  if (host==="localhost" || host.endsWith(".localhost") || host.endsWith(".local")) throw new Error("Private and local network addresses cannot be scanned.");
+  const addresses=isIP(host)?[{address:host}]:await lookup(host,{all:true,verbatim:true});
+  if (!addresses.length || addresses.some(x=>isPrivateAddress(x.address))) throw new Error("The website resolves to a private or restricted network address.");
+  return u;
+}
+async function readLimited(response, maxBytes=1_000_000) {
+  const reader=response.body?.getReader(); if(!reader)return "";
+  const chunks=[]; let size=0;
+  while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>maxBytes){await reader.cancel();throw new Error("Website response is larger than the 1 MB audit limit.");}chunks.push(value);}
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
+function inspectWebsiteHtml(html, finalUrl, status) {
+  const title=(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||"").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
+  const description=html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)/i)?.[1] || html.match(/<meta[^>]+content=["']([^"']*)["'][^>]+name=["']description["']/i)?.[1] || "";
+  const hasViewport=/<meta[^>]+name=["']viewport["']/i.test(html);
+  const h1=(html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)?.[1]||"").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
+  const hasForm=/<form\b/i.test(html);
+  const hasPhone=/tel:/i.test(html);
+  const hasEmail=/mailto:/i.test(html);
+  const cta=/(book now|book online|get a quote|request a quote|contact us|call now|schedule|free estimate|call today)/i.test(html.replace(/<[^>]+>/g," "));
+  const serviceWords=/(services|what we do|our work|landscap|roof|paint|plumb|clean|construct|tree service|pressure wash)/i.test(html);
+  const checks=[
+    {key:"https",label:"HTTPS",pass:finalUrl.protocol==="https:",detail:finalUrl.protocol==="https:"?"Website uses HTTPS":"Website is served without HTTPS"},
+    {key:"mobileFriendly",label:"Mobile viewport",pass:hasViewport,detail:hasViewport?"Viewport metadata found":"No viewport metadata detected"},
+    {key:"clearCTA",label:"Contact / booking call to action",pass:cta,detail:cta?"A common conversion phrase was found":"No obvious booking, quote, or contact CTA phrase detected"},
+    {key:"contactForm",label:"Lead capture",pass:hasForm||hasPhone||hasEmail,detail:hasForm?"HTML form detected":hasPhone||hasEmail?"Phone or email link detected":"No HTML form, phone link, or email link detected"},
+    {key:"pageTitle",label:"Page title",pass:Boolean(title),detail:title||"No page title found"},
+    {key:"metaDescription",label:"Meta description",pass:Boolean(description),detail:description||"No meta description found"},
+    {key:"mainHeading",label:"Main heading",pass:Boolean(h1),detail:h1||"No H1 heading found"},
+    {key:"serviceContent",label:"Service content",pass:serviceWords,detail:serviceWords?"Service-related wording detected":"Could not detect common service-related wording"}
+  ];
+  const score=Math.round(checks.filter(x=>x.pass).length/checks.length*100);
+  return {url:finalUrl.href,httpStatus:status,title,description,heading:h1,score,checks,findings:checks.filter(x=>!x.pass).map(x=>x.detail),limitations:"Automated HTML-level screening only. This does not test real mobile rendering, accessibility, page speed, SEO rankings, security vulnerabilities, or conversion performance."};
+}
+async function runWebsiteAudit(rawUrl) {
+  let current=await checkedPublicUrl(rawUrl), response;
+  for(let redirects=0;redirects<=3;redirects++){
+    response=await fetch(current,{redirect:"manual",signal:AbortSignal.timeout(12000),headers:{"user-agent":"NexoraWebsiteAudit/1.0 (+https://nexorasmartdigital.com)","accept":"text/html,application/xhtml+xml"}});
+    if([301,302,303,307,308].includes(response.status)){
+      const location=response.headers.get("location");if(!location)throw new Error("Website returned a redirect without a destination.");
+      if(redirects===3)throw new Error("Website redirected too many times.");
+      current=await checkedPublicUrl(new URL(location,current).href);continue;
+    }
+    break;
+  }
+  const type=response.headers.get("content-type")||"";
+  if(!type.includes("text/html")&&!type.includes("application/xhtml+xml"))throw new Error("The URL did not return an HTML webpage.");
+  const html=await readLimited(response);
+  return inspectWebsiteHtml(html,current,response.status);
+}
+
+const server = http.createServer(async (req,res) => {
+  try {
+    const url = new URL(req.url, "http://localhost");
+    if (req.method === "OPTIONS") { res.writeHead(204, {"access-control-allow-methods":"GET,POST,PATCH,DELETE,OPTIONS","access-control-allow-headers":"Content-Type,Authorization"}); return res.end(); }
+    res.setHeader("x-content-type-options","nosniff"); res.setHeader("referrer-policy","no-referrer"); res.setHeader("x-frame-options","DENY"); res.setHeader("permissions-policy","camera=(), microphone=(), geolocation=()");
+    if (url.pathname === "/health") return send(res,200,{ok:true,service:"nexora-lead-engine",savedLeads:leads.length});
+    if (!authorized(req)) { res.writeHead(401, {"www-authenticate":'Basic realm="Nexora Lead Engine"',"content-type":"application/json"}); return res.end(JSON.stringify({error:"Sign in required"})); }
+    if (url.pathname === "/api/config" && req.method === "GET") return send(res,200,{placesReady:Boolean(GOOGLE_PLACES_API_KEY),googlePlacesConfigured:Boolean(GOOGLE_PLACES_API_KEY),goHighLevelConfigured:Boolean(GHL_API_KEY && GHL_LOCATION_ID),voiceConfigured:Boolean(process.env.VOICE_PROVIDER_API_KEY),savedLeads:leads.length,securePasswordConfigured:ADMIN_PASSWORD.length>=16});
+    if (url.pathname === "/api/audits/scan" && req.method === "POST") {
+      const body=await readBody(req), websiteUrl=String(body.websiteUrl||"").trim(), name=String(body.name||"").trim();
+      if(!websiteUrl)return send(res,400,{error:"Enter a website URL to audit."});
+      if(name.length>160)return send(res,400,{error:"Business name is too long."});
+      try{
+        const result=await runWebsiteAudit(websiteUrl);
+        const record={id:crypto.randomUUID(),name:name||new URL(result.url).hostname,websiteUrl:result.url,status:"reviewed",auditScore:result.score,checks:result.checks,findings:result.findings,description:result.description,title:result.title,heading:result.heading,httpStatus:result.httpStatus,limitations:result.limitations,createdAt:new Date().toISOString(),source:"automated_html_audit"};
+        const file=path.join(DATA_DIR,"audits.json");let audits=[];try{audits=JSON.parse(await readFile(file,"utf8"));if(!Array.isArray(audits))audits=[];}catch{}
+        audits.unshift(record);await writeFile(file+".tmp",JSON.stringify(audits,null,2),"utf8");await rename(file+".tmp",file);
+        return send(res,200,{audit:record});
+      }catch(error){return send(res,422,{error:error.message||"Website audit could not be completed."});}
+    }
+    if (url.pathname === "/api/integrations/status" && req.method === "GET") return send(res,200,{integrations:getIntegrationStatus(process.env),generatedAt:new Date().toISOString()});
+    if (url.pathname === "/api/system/backups" && req.method === "GET") { const dir=path.join(DATA_DIR,"backups"); await mkdir(dir,{recursive:true}); const files=(await readdir(dir)).filter(x=>x.endsWith(".json")).sort().reverse(); return send(res,200,{backups:await Promise.all(files.map(async name=>({name,size:(await stat(path.join(dir,name))).size}))) }); }
+    if (url.pathname === "/api/system/backups" && req.method === "POST") { const dir=path.join(DATA_DIR,"backups"); await mkdir(dir,{recursive:true}); const stamp=new Date().toISOString().replace(/[:.]/g,"-"); const files=["leads.json","lead-activity.json",...["clients","appointments","tasks","invoices","approvals","outreach","proposals","projects","callLogs","audits"].map(x=>x+".json")]; const snapshot={createdAt:new Date().toISOString(),files:{}}; for(const name of files){try{snapshot.files[name]=JSON.parse(await readFile(path.join(DATA_DIR,name),"utf8"));}catch{snapshot.files[name]=[];}} const target=path.join(dir,"nexora-backup-"+stamp+".json"); await writeFile(target,JSON.stringify(snapshot,null,2),"utf8"); const all=(await readdir(dir)).filter(x=>x.endsWith(".json")).sort().reverse(); for(const stale of all.slice(10)){const stalePath=path.join(dir,stale);await (await import("node:fs/promises")).unlink(stalePath);} return send(res,201,{ok:true,name:path.basename(target),recordCollections:Object.keys(snapshot.files).length,retainedBackups:Math.min(all.length+1,10)}); }
+    if (url.pathname === "/api/dashboard/summary" && req.method === "GET") {
+      const readCollection=async name=>{try{const value=JSON.parse(await readFile(path.join(DATA_DIR,name+".json"),"utf8"));return Array.isArray(value)?value:[]}catch{return []}};
+      const [clients,appointments,tasks,invoices,approvals,outreach,proposals,projects,callLogs]=await Promise.all(["clients","appointments","tasks","invoices","approvals","outreach","proposals","projects","callLogs"].map(readCollection));
+      return send(res,200,{leads:{total:leads.length,qualified:leads.filter(x=>x.qualified).length,withoutWebsite:leads.filter(x=>!x.website).length,new:leads.filter(x=>x.status==="new").length,highPriority:leads.filter(x=>x.scoreTier==="high").length},clients:clients.length,appointments:{total:appointments.length,upcoming:appointments.filter(x=>["requested","scheduled"].includes(x.status)).length},tasks:{total:tasks.length,open:tasks.filter(x=>x.status!=="done").length},invoices:{total:invoices.length,unpaid:invoices.filter(x=>!["paid","cancelled"].includes(x.status)).length},approvals:{total:approvals.length,pending:approvals.filter(x=>x.status==="pending").length},outreach:{drafts:outreach.length,awaitingApproval:outreach.filter(x=>x.status==="pending_approval").length},proposals:{total:proposals.length,awaitingReview:proposals.filter(x=>x.status==="ready_for_review").length},projects:{total:projects.length,active:projects.filter(x=>!["completed","on_hold"].includes(x.status)).length},callLogs:callLogs.length});
+    }
+    const ghlPrefix="/api/integrations/highlevel/sync/"; const ghlId=url.pathname.startsWith(ghlPrefix)?url.pathname.slice(ghlPrefix.length):""; const ghlSyncMatch=ghlId && /^[a-zA-Z0-9_-]+$/.test(ghlId) ? [null,ghlId] : null;
+    if (ghlSyncMatch && req.method === "POST") {
+      if (!GHL_API_KEY || !GHL_LOCATION_ID) return send(res,503,{error:"GoHighLevel is not configured. Add a sub-account Private Integration Token and location ID in Railway Variables."});
+      const lead=leads.find(x=>x.id===ghlSyncMatch[1]);
+      if (!lead) return send(res,404,{error:"Lead not found"});
+      if (!lead.qualified) return send(res,400,{error:"Only leads marked qualified can be synced to GoHighLevel."});
+      if (!lead.phone) return send(res,400,{error:"This lead has no phone number. Add a valid email or phone before syncing."});
+      if (lead.ghlContactId) return send(res,200,{ok:true,alreadySynced:true,contactId:lead.ghlContactId});
+      const nameParts=String(lead.name||"").trim().split(/\\s+/); const payload={locationId:GHL_LOCATION_ID,firstName:nameParts.shift()||lead.name,lastName:nameParts.join(" "),companyName:lead.name,phone:lead.phone,website:lead.website||undefined,address1:lead.address||undefined,source:"Nexora Smart Digital Lead Engine",tags:["Nexora Lead","Website Prospect"]};
+      const response=await fetch("https://services.leadconnectorhq.com/contacts/upsert",{method:"POST",headers:{"Authorization":"Bearer "+GHL_API_KEY,"Version":"2021-07-28","Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify(payload)});
+      const result=await response.json().catch(()=>({}));
+      if(!response.ok) return send(res,502,{error:result.message||result.error||"GoHighLevel sync failed. Check token permissions and location."});
+      const contactId=result.contact?.id;
+      if(!contactId) return send(res,502,{error:"GoHighLevel returned no contact ID; local lead was not marked synced."});
+      lead.ghlContactId=contactId; lead.ghlSyncedAt=new Date().toISOString(); await persist();
+      return send(res,200,{ok:true,contactId,created:result.new??null});
+    }
+    const salesPrefix="/api/sales-kit/"; const salesId=url.pathname.startsWith(salesPrefix)?url.pathname.slice(salesPrefix.length):""; const salesKitMatch=salesId && /^[a-zA-Z0-9_-]+$/.test(salesId) ? [null,salesId] : null;
+    const proposalPrefix="/api/proposal-kit/"; const proposalId=url.pathname.startsWith(proposalPrefix)?url.pathname.slice(proposalPrefix.length):""; const proposalMatch=proposalId && /^[a-zA-Z0-9_-]+$/.test(proposalId) ? [null,proposalId] : null;
+    if(proposalMatch && req.method==="GET"){
+      const lead=leads.find(x=>x.id===proposalMatch[1]);
+      if(!lead)return send(res,404,{error:"Lead not found"});
+      const scope=["Mobile-first custom website design","Clear service pages and calls to action","Contact and quote-request form","Local SEO foundations and page metadata","Basic analytics and lead-capture setup"];
+      return send(res,200,{lead:{id:lead.id,name:lead.name,phone:lead.phone,website:lead.website,city:lead.city},proposal:{title:"Website growth proposal for "+lead.name,preparedFor:lead.name,preparedBy:"Nexora Smart Digital",objective:"Create a professional online presence that helps local customers understand the services and request a quote.",scope,clientInputs:["Business details and service area","Approved logo, colors, and photos","Services, pricing, and preferred calls to action","Domain access when needed"],milestones:["Discovery and content collection","Initial design and build","Client review and revisions","Launch after explicit written approval"],investment:"To be confirmed by Nexora",timeline:"To be agreed after requirements are confirmed",terms:"Payment schedule, revision allowance, hosting, ongoing support, and cancellation terms must be agreed in writing before work begins."}});
+    }
+    if (salesKitMatch && req.method==="GET") {
+      const lead=leads.find(x=>x.id===salesKitMatch[1]);
+      if(!lead) return send(res,404,{error:"Lead not found"});
+      const missing=lead.website?"":"No website is listed on the public business profile";
+      const subject="A quick website opportunity for "+lead.name;
+      const opener="Hi "+lead.name+", I came across your business in "+(lead.city||"your area")+" and wanted to reach out.";
+      const value=lead.website?"I noticed an opportunity to make it easier for local customers to request quotes and contact you from their phones.":"I couldn't find a website listed for your business, which may make it harder for customers to see your services and request a quote.";
+      const pitch=opener+" "+value+" Nexora Smart Digital builds mobile-friendly websites with clear calls to action and lead capture. Would you be open to seeing a free custom website preview?";
+      const callScript="Hi, is this "+lead.name+"? My name is calling from Nexora Smart Digital. We help local service businesses turn more website visitors into quote requests. "+(missing? "I couldn't find a website listed for your business.":"I noticed a few opportunities to improve how customers contact you online.")+" Would you be interested in a free custom website preview?";
+      return send(res,200,{lead:{id:lead.id,name:lead.name,phone:lead.phone,website:lead.website,city:lead.city},subject,emailDraft:pitch,callScript,opportunity:missing||"Improve mobile contact and quote-request conversion",recommendedNextStep:"Review the business website and public details before contacting. Personalize this draft and obtain approval before sending.",claimsToVerify:["Current website quality and mobile experience","Services and service area","Existing quote or booking process"]});
+    }
+    if (url.pathname === "/api/qualification" && req.method === "POST") {
+      const body=await readBody(req), ids=Array.isArray(body.ids)?new Set(body.ids):null;
+      let updated=0;
+      for (const lead of leads) {
+        if (ids && !ids.has(lead.id)) continue;
+        const result=qualifyLead(lead);
+        lead.score=result.score; lead.scoreTier=result.tier; lead.scoreReasons=result.reasons;
+        lead.qualified=result.score>=60; lead.scoredAt=new Date().toISOString(); updated++;
+      }
+      await persist();
+      return send(res,200,{updated,leads:leads.map(x=>({id:x.id,score:x.score,scoreTier:x.scoreTier,qualified:x.qualified}))});
+    }
+    if(url.pathname==="/api/calendar.ics" && req.method==="GET"){
+      let appointments=[];try{appointments=JSON.parse(await readFile(path.join(DATA_DIR,"appointments.json"),"utf8"));}catch{}
+      const esc=value=>String(value||"").replace(/\\\\/g,"\\\\\\\\").replace(/\\n/g,"\\\\n").replace(/,/g,"\\\\,").replace(/;/g,"\\\\;");
+      const stamp=value=>String(value||"").replace(/[-:]/g,"").replace(/\\.\\d{3}/,"");
+      const events=(Array.isArray(appointments)?appointments:[]).filter(a=>a.status==="scheduled"&&a.date&&a.time).map(a=>{
+        const start=String(a.date).replace(/-/g,"")+"T"+String(a.time).replace(/:/g,"")+"00";
+        const endDate=new Date(Date.UTC(Number(a.date.slice(0,4)),Number(a.date.slice(5,7))-1,Number(a.date.slice(8,10)),Number(a.time.slice(0,2)),Number(a.time.slice(3,5)))+(Number(a.durationMinutes)||30)*60000);
+        const end=endDate.toISOString().replace(/[-:]/g,"").replace(/\\.\\d{3}Z/,"");
+        return ["BEGIN:VEVENT","UID:"+a.id+"@nexora","DTSTAMP:"+new Date().toISOString().replace(/[-:]/g,"").replace(/\\.\\d{3}Z/,"")+"Z","DTSTART:"+start,"DTEND:"+end,"SUMMARY:"+esc(a.title),"DESCRIPTION:"+esc(a.notes||a.description||""),"LOCATION:"+esc(a.location||""),"END:VEVENT"].join("\\r\\n");
+      });
+      const calendar=["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//Nexora Smart Digital//Appointments//EN","CALSCALE:GREGORIAN",...events,"END:VCALENDAR"].join("\\r\\n");
+      res.writeHead(200,{"content-type":"text/calendar; charset=utf-8","content-disposition":'attachment; filename="nexora-appointments.ics"',"cache-control":"no-store"});
+      return res.end(calendar);
+    }
+    if (await handleWorkflow(req,res,url,send,readBody)) return;
+    const activityMatch=url.pathname.match(/^\\/api\\/leads\\/([\\w-]+)\\/activity$/);
+    if(activityMatch && req.method==="GET"){
+      const lead=leads.find(x=>x.id===activityMatch[1]);
+      if(!lead)return send(res,404,{error:"Lead not found"});
+      return send(res,200,{items:leadActivity.filter(x=>x.leadId===lead.id)});
+    }
+    if(activityMatch && req.method==="POST"){
+      const lead=leads.find(x=>x.id===activityMatch[1]);
+      if(!lead)return send(res,404,{error:"Lead not found"});
+      const body=await readBody(req), message=String(body.message||"").trim();
+      if(!message)return send(res,400,{error:"Enter an activity note."});
+      if(message.length>2000)return send(res,400,{error:"Activity notes must be 2,000 characters or fewer."});
+      await logLeadActivity(lead.id,"note",message);
+      return send(res,201,{ok:true});
+    }
+    if(url.pathname==="/api/reminders" && req.method==="GET"){
+      const now=new Date(), horizon=new Date(now.getTime()+7*86400000);
+      const readRows=async name=>{try{const rows=JSON.parse(await readFile(path.join(DATA_DIR,name+".json"),"utf8"));return Array.isArray(rows)?rows:[]}catch{return []}};
+      const [appointments,tasks,invoices]=await Promise.all(["appointments","tasks","invoices"].map(readRows));
+      const items=[];
+      for(const a of appointments){if(!["requested","scheduled"].includes(a.status)||!a.date||!a.time)continue;const at=new Date(a.date+"T"+a.time+":00");if(!Number.isNaN(at.getTime())&&at>=now&&at<=horizon)items.push({type:"appointment",id:a.id,title:a.title||"Appointment",at:at.toISOString(),status:a.status,detail:a.phone||a.name||""});}
+      for(const t of tasks){if(t.status==="done"||!t.dueDate)continue;const at=new Date(t.dueDate+"T23:59:59");if(!Number.isNaN(at.getTime())&&at<=horizon)items.push({type:"task",id:t.id,title:t.title||"Task due",at:at.toISOString(),status:at<now?"overdue":"upcoming",detail:t.assignedTo||""});}
+      for(const inv of invoices){if(["paid","cancelled"].includes(inv.status)||!inv.dueDate)continue;const at=new Date(inv.dueDate+"T23:59:59");if(!Number.isNaN(at.getTime())&&at<=horizon)items.push({type:"invoice",id:inv.id,title:inv.title||"Invoice due",at:at.toISOString(),status:at<now?"overdue":inv.status,detail:(inv.currency||"USD")+" "+inv.amount});}
+      items.sort((a,b)=>Date.parse(a.at)-Date.parse(b.at));
+      return send(res,200,{items,total:items.length,generatedAt:now.toISOString(),windowDays:7});
+    }
+    if(url.pathname==="/api/followups" && req.method==="GET"){
+      const now=Date.now();
+      const items=leads.filter(x=>x.followUpAt).map(x=>({...x,followUpState:Date.parse(x.followUpAt)<=now?"due":"upcoming"})).sort((a,b)=>Date.parse(a.followUpAt)-Date.parse(b.followUpAt));
+      return send(res,200,{items,due:items.filter(x=>x.followUpState==="due").length,upcoming:items.filter(x=>x.followUpState==="upcoming").length});
+    }
+    if (url.pathname === "/api/leads" && req.method === "GET") {
+      const q=(url.searchParams.get("q")||"").toLowerCase();
+      const status=url.searchParams.get("status")||"";
+      const items=leads.filter(x=>(!status||x.status===status) && (!q||[x.name,x.phone,x.address,x.niche,x.city].join(" ").toLowerCase().includes(q)));
+      return send(res,200,{leads:items,total:items.length});
+    }
+    if (url.pathname === "/api/search" && req.method === "POST") {
+      if (!GOOGLE_PLACES_API_KEY) return send(res,503,{error:"Lead discovery is not configured yet. Add GOOGLE_PLACES_API_KEY in the service environment."});
+      const body=await readBody(req), niche=String(body.niche||"").trim(), location=String(body.location||"").trim();
+      if (!niche||!location) return send(res,400,{error:"Enter an industry and a city or area."});
+      if (niche.length>100 || location.length>120) return send(res,400,{error:"Search terms are too long."});
+      const max=Math.min(20,Math.max(1,Number(body.maxResults)||20));
+      const response=await fetch("https://places.googleapis.com/v1/places:searchText",{
+        method:"POST",headers:{"Content-Type":"application/json","X-Goog-Api-Key":GOOGLE_PLACES_API_KEY,"X-Goog-FieldMask":"places.id,places.displayName,places.nationalPhoneNumber,places.internationalPhoneNumber,places.websiteUri,places.formattedAddress,places.rating,places.userRatingCount,places.googleMapsUri"},
+        body:JSON.stringify({textQuery:niche+" in "+location,pageSize:max})
+      });
+      const result=await response.json();
+      if (!response.ok) return send(res,502,{error:result.error?.message||"Business search provider returned an error."});
+      const existing=new Set(leads.map(x=>x.sourceId).filter(Boolean));
+      const prospects=(result.places||[]).map(p=>cleanPlace(p,niche,location)).map(p=>({...p,alreadySaved:existing.has(p.sourceId)}));
+      return send(res,200,{prospects,total:prospects.length,provider:"Google Places"});
+    }
+    if (url.pathname === "/api/leads/import" && req.method === "POST") {
+      const body=await readBody(req), items=Array.isArray(body.leads)?body.leads:[];
+      let added=0;
+      for (const item of items) {
+        if (!item?.name) continue;
+        const duplicate=leads.some(x=>(item.sourceId&&x.sourceId===item.sourceId)||(!item.sourceId&&x.name===item.name&&x.address===item.address));
+        if (!duplicate) { leads.unshift({...item,id:crypto.randomUUID(),status:"new",qualified:false,createdAt:new Date().toISOString()}); added++; }
+      }
+      await persist(); if(added) await logLeadActivity("system","import","Imported "+added+" leads",{count:added}); return send(res,200,{added,total:leads.length});
+    }
+    const match=url.pathname.match(/^\/api\/leads\/([\w-]+)$/);
+    if (match && req.method==="PATCH") {
+      const body=await readBody(req), item=leads.find(x=>x.id===match[1]);
+      if (!item) return send(res,404,{error:"Lead not found"});
+      if ("status" in body && !["new","contacted","qualified","customer","not_a_fit"].includes(body.status)) return send(res,400,{error:"Invalid lead status"});
+      if ("qualified" in body && typeof body.qualified!=="boolean") return send(res,400,{error:"Qualified must be true or false"});
+      if ("notes" in body && typeof body.notes!=="string") return send(res,400,{error:"Notes must be text"});
+      if ("followUpAt" in body && body.followUpAt!==null && (!Number.isFinite(Date.parse(body.followUpAt)))) return send(res,400,{error:"Follow-up date must be a valid ISO date/time."});
+      if ("followUpNote" in body && typeof body.followUpNote!=="string") return send(res,400,{error:"Follow-up note must be text"});
+      const changed=[];
+      for (const key of ["status","qualified","notes","followUpAt","followUpNote"]) if (key in body && item[key]!==body[key]) { item[key]=body[key]; changed.push(key); }
+      await persist();
+      if(changed.length) await logLeadActivity(item.id,"updated","Updated "+changed.join(", "),{fields:changed});
+      return send(res,200,{lead:item});
+    }
+    if (match && req.method==="DELETE") {
+      const before=leads.length; leads=leads.filter(x=>x.id!==match[1]);
+      if (before===leads.length) return send(res,404,{error:"Lead not found"});
+      await persist(); return send(res,200,{ok:true});
+    }
+    if (url.pathname==="/api/export.csv" && req.method==="GET") {
+      const fields=["name","phone","website","address","rating","reviewCount","niche","city","status","qualified","mapsUrl"];
+      const esc=v=>'"'+String(v??"").replaceAll('"','""')+'"';
+      const csv=[fields.join(","),...leads.map(x=>fields.map(k=>esc(x[k])).join(","))].join("\r\n");
+      return send(res,200,csv,"text/csv; charset=utf-8");
+    }
+    if (url.pathname.startsWith("/api/")) return send(res,404,{error:"API route not found"});
+    const file=path.join(__dirname,"public",url.pathname==="/"?"index.html":path.basename(url.pathname));
+    try { const content=await readFile(file); const ext=path.extname(file); const types={".html":"text/html; charset=utf-8",".js":"text/javascript; charset=utf-8",".css":"text/css; charset=utf-8"}; return send(res,200,content,types[ext]||"application/octet-stream"); }
+    catch { return send(res,404,"Not found","text/plain; charset=utf-8"); }
+  } catch (error) { console.error(error); return send(res,500,{error:"Unexpected server error"}); }
+});
+server.listen(PORT,"0.0.0.0",()=>console.log("Nexora Lead Engine listening on "+PORT));
